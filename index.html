@@ -1,0 +1,924 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>SSG Sales Graduation Tracker</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{font-family:'Inter',-apple-system,BlinkMacSystemFont,sans-serif;background:#f5f3ff;min-height:100vh;color:#1f2937}
+button{cursor:pointer;font-family:inherit}
+button:disabled{opacity:.5;cursor:not-allowed}
+button:not(:disabled):hover{opacity:.88}
+input,textarea,select{font-family:inherit}
+textarea:focus,input:focus{outline:none;border-color:#9333ea!important;box-shadow:0 0 0 3px #ede9fe}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:#f3f4f6}
+::-webkit-scrollbar-thumb{background:#d1d5db;border-radius:3px}
+input[type=date]::-webkit-calendar-picker-indicator{cursor:pointer}
+.card{background:#fff;border-radius:12px;padding:18px;cursor:pointer;transition:all .2s;position:relative;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+.card:hover{box-shadow:0 4px 16px rgba(147,51,234,.15)}
+.tab-btn{background:none;border:none;font-size:13px;font-weight:400;cursor:pointer;padding:12px 18px;border-bottom:2px solid transparent;margin-bottom:-2px;transition:all .15s;color:#9ca3af}
+.tab-btn.active{color:#7e22ce;font-weight:700;border-bottom-color:#7e22ce}
+.chk{width:22px;height:22px;border-radius:4px;border:2px solid #d1d5db;background:#fff;display:flex;align-items:center;justify-content:center;color:#fff;font-size:13px;font-weight:800;transition:all .15s;flex-shrink:0}
+.chk.on{border-color:#9333ea;background:#9333ea}
+.note-btn{width:24px;height:24px;border-radius:4px;border:1px solid #e5e7eb;background:#f9fafb;font-size:11px;display:flex;align-items:center;justify-content:center;color:#9ca3af;transition:all .15s}
+.note-btn.has{border-color:#9333ea;background:#ede9fe;color:#7e22ce}
+.comp-row{display:grid;grid-template-columns:1fr repeat(5,80px) 76px 36px;border-bottom:1px solid #f3e8ff;transition:background .2s}
+.comp-hdr{display:grid;grid-template-columns:1fr repeat(5,80px) 76px 36px;background:#1e1b4b}
+.note-row{padding:8px 12px 10px 32px;background:#faf5ff;border-bottom:1px solid #f3e8ff;border-top:1px solid #ede9fe}
+.toast{position:fixed;bottom:24px;right:24px;background:#1e1b4b;color:#fff;padding:12px 20px;border-radius:8px;font-size:13px;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,.2);z-index:9999;transition:opacity .3s;display:flex;align-items:center;gap:10px}
+.spinner{width:16px;height:16px;border:2px solid #ffffff44;border-top-color:#fff;border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+.badge{font-size:11px;border-radius:4px;padding:2px 8px;font-weight:600}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="toast" style="display:none" class="toast"></div>
+
+<script>
+// ── CONFIG ────────────────────────────────────────────────────────────────
+const SB_URL  = "https://pqwcrujavfxwewfjsdjx.supabase.co";
+const SB_KEY  = "sb_publishable_3GGNq1DRfnFeUSqNPjCqrw_NVxtupEK";
+const HEADERS = { "apikey": SB_KEY, "Authorization": "Bearer "+SB_KEY, "Content-Type": "application/json", "Prefer": "return=representation" };
+
+// ── SUPABASE API ──────────────────────────────────────────────────────────
+async function sbFetch(path, method="GET", body=null, extraHeaders={}){
+  const headers = {
+    "apikey": SB_KEY,
+    "Authorization": "Bearer " + SB_KEY,
+    "Content-Type": "application/json",
+    ...extraHeaders
+  };
+  const opts = { method, headers };
+  if(body !== null) opts.body = JSON.stringify(body);
+  const res = await fetch(SB_URL + path, opts);
+  if(!res.ok){
+    const err = await res.text();
+    console.error("Supabase error:", res.status, err);
+    throw new Error("(" + res.status + ") " + err);
+  }
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
+}
+async function getAllTrainees(){
+  return await sbFetch("/rest/v1/trainees?select=*&order=created_at.asc") || [];
+}
+async function upsertTrainee(t){
+  const row = {
+    id: t.id,
+    name: t.name,
+    start_date: t.startDate,
+    manager_name: t.managerName || "",
+    graduated: t.graduated,
+    graduated_at: t.graduatedAt || null,
+    notes: t.notes || "",
+    progress: t.progress
+  };
+  return await sbFetch(
+    "/rest/v1/trainees",
+    "POST",
+    row,
+    { "Prefer": "resolution=merge-duplicates,return=minimal" }
+  );
+}
+async function deleteTrainee(id){
+  await sbFetch("/rest/v1/trainees?id=eq." + id, "DELETE");
+}
+function rowToTrainee(r){
+  // Ensure progress has all required keys (handles schema changes)
+  const base = emptyProgress();
+  const prog = r.progress || {};
+  const comps = { ...base.competencies, ...(prog.competencies || {}) };
+  const extras = { ...base.extras, ...(prog.extras || {}) };
+  return {
+    id: r.id, name: r.name, startDate: r.start_date,
+    managerName: r.manager_name || "",
+    createdAt: r.created_at, graduated: r.graduated,
+    graduatedAt: r.graduated_at, notes: r.notes || "",
+    progress: { competencies: comps, extras }
+  };
+}
+
+// ── DATA ──────────────────────────────────────────────────────────────────
+const MANAGERS = ["Onboarding Mgr","L&OD Leader","Team Manager","Team Director","City Head"];
+const PACE = [
+  {label:"0-4 wks",  days:28,  target:5},
+  {label:"4-6 wks",  days:42,  target:8},
+  {label:"6-8 wks",  days:56,  target:12},
+  {label:"8-12 wks", days:84,  target:25},
+  {label:"12-16 wks",days:112, target:35},
+  {label:"16-20 wks",days:140, target:9999},
+];
+const CF = [
+  {section:"INDUCTION TRAINING",items:[
+    {id:"ind_1",label:"Complete all elements of induction training",sub:false},
+    {id:"ind_2",label:"Pass knowledge checker assessment",sub:true},
+    {id:"ind_3",label:"Complete AI role play and receive sign-off",sub:true},
+    {id:"ind_4",label:"Graduate from induction program",sub:false},
+  ]},
+  {section:"CANDIDATE SALES CYCLE",items:[
+    {id:"csc_1",label:"Candidate qualification",sub:false},
+    {id:"csc_2",label:"Lead generation from candidate sales call",sub:false},
+    {id:"csc_3",label:"Relevant reference gathered",sub:true},
+    {id:"csc_4",label:"Referral gathered",sub:true},
+    {id:"csc_5",label:"Info lead gathered in Patch",sub:true},
+    {id:"csc_6",label:"Work history gathered",sub:true},
+    {id:"csc_7",label:"Demonstrate a GOLD 50 Candidate within core vertical or target customer",sub:false},
+    {id:"csc_8",label:"Conduct a candidate meeting",sub:false},
+  ]},
+  {section:"LEAD CONVERSION PROCESS",items:[
+    {id:"lcp_1",label:"Conduct a reference call and convert into a sales call",sub:false},
+    {id:"lcp_2",label:"Demonstrate steps for chasing an active work history",sub:false},
+    {id:"lcp_3",label:"Demonstrate steps for chasing an info lead",sub:false},
+    {id:"lcp_4",label:"Demonstrate how spec sends can be used to build a market",sub:false},
+  ]},
+  {section:"CUSTOMER PROFICIENCY",items:[
+    {id:"cp_1",label:"Conduct an effective cold sales call (Demonstrate structure of sales call)",sub:false},
+    {id:"cp_2",label:"Book a meeting from a sales call",sub:false},
+    {id:"cp_3",label:"Conduct a customer meeting (rapport, signposting, effective questioning, next steps)",sub:false},
+    {id:"cp_4",label:"Demonstrate needs-based selling",sub:false},
+  ]},
+  {section:"JOB PROCESS",items:[
+    {id:"jp_1",label:"Demonstrate the skills of working a job to best practice (Candidate recruitment, BD, applicant management, next steps)",sub:false},
+    {id:"jp_2",label:"Successful achieving compliant submissions to live vacancies",sub:false},
+  ]},
+  {section:"NETWORK BUILDING",items:[
+    {id:"nb_1",label:"Showcase understanding of work histories and impact on building GOLD Manager Hotlist",sub:false},
+    {id:"nb_2",label:"Build and receive sign-off on your GOLD 50 Candidate list",sub:false},
+    {id:"nb_3",label:"Build and receive sign-off on your GOLD 50 Manager list",sub:false},
+    {id:"nb_4",label:"Sign off on market presentation",sub:false},
+    {id:"nb_5",label:"Demonstrate proficiency with the BYN Tool",sub:false},
+  ]},
+  {section:"KPI MANAGEMENT",items:[
+    {id:"kpi_1",label:"Achieve 100 points on the BYB in a single month",sub:false},
+    {id:"kpi_2",label:"Achieve MPR targets in a month (Including specific focus on CORE 4)",sub:false},
+  ]},
+  {section:"SYSTEMS PROFICIENCY",items:[
+    {id:"sp_1",label:"Build a hotlist (outside of GC/GM)",sub:false},
+    {id:"sp_2",label:"Build a 'view'",sub:false},
+    {id:"sp_3",label:"Log applicable KPIs",sub:false},
+    {id:"sp_4",label:"Info lead",sub:true},
+    {id:"sp_5",label:"Sales call (candidate / client)",sub:true},
+    {id:"sp_6",label:"Reference (Identified and completed)",sub:true},
+    {id:"sp_7",label:"Meeting",sub:true},
+    {id:"sp_8",label:"Spec send",sub:true},
+    {id:"sp_9",label:"Submission",sub:true},
+    {id:"sp_10",label:"Work history",sub:true},
+    {id:"sp_11",label:"New manager",sub:true},
+    {id:"sp_12",label:"Vacancy",sub:true},
+    {id:"sp_13",label:"Demonstrate proficiency with MERCURY Search",sub:false},
+  ]},
+];
+const EC = [
+  {id:"ec_1",label:"1st Interview"},{id:"ec_2",label:"Conduct job spec"},
+  {id:"ec_3",label:"Hit 20 pts/day on BYB"},{id:"ec_4",label:"Gather 30 work histories"},
+  {id:"ec_5",label:"Flip a reference into a client meeting"},{id:"ec_6",label:"Conduct a client meeting"},
+  {id:"ec_7",label:"First confirmed ABC Job"},{id:"ec_8",label:"First Placement"},
+  {id:"ec_9",label:"New MSA"},{id:"ec_10",label:"100 GOLD Managers"},
+  {id:"ec_11",label:"100 GOLD Candidates"},{id:"ec_12",label:"Payroll opportunity"},
+  {id:"ec_13",label:"Referral placed"},{id:"ec_14",label:"Sellback placed"},
+];
+
+function emptyProgress(){
+  const c={};
+  CF.forEach(s=>s.items.forEach(i=>{c[i.id]={signoffs:[],date:null,note:""}}));
+  const e={};
+  EC.forEach(x=>{e[x.id]={achieved:false,date:null}});
+  return{competencies:c,extras:e};
+}
+function newTrainee(name,startDate,managerName){
+  return{id:"t_"+Date.now(),name,startDate,managerName,
+    createdAt:new Date().toISOString(),graduated:false,graduatedAt:null,
+    notes:"",progress:emptyProgress()};
+}
+
+// ── HELPERS ───────────────────────────────────────────────────────────────
+function calcProgress(t){
+  const all=CF.flatMap(s=>s.items);
+  const done=all.filter(i=>(t.progress.competencies[i.id]?.signoffs?.length||0)>=2).length;
+  return{total:all.length,done,pct:Math.round((done/all.length)*100)};
+}
+function daysActive(t){return Math.max(0,Math.floor((Date.now()-new Date(t.startDate))/86400000));}
+function daysLeft(t){return Math.max(0,140-daysActive(t));}
+function fmtDate(d){if(!d)return"";return new Date(d).toLocaleDateString("en-GB",{day:"2-digit",month:"short",year:"numeric"});}
+function accentColor(t){
+  if(t.graduated)return"#16a34a";
+  const d=daysActive(t);
+  if(d>120)return"#dc2626";
+  if(d>98)return"#ea580c";
+  return"#9333ea";
+}
+function getPace(t){
+  const days=daysActive(t),{done}=calcProgress(t);
+  const total=CF.flatMap(s=>s.items).length;
+  let m=PACE[PACE.length-1];
+  for(const p of PACE){if(days<=p.days){m=p;break;}}
+  const target=m.target>=9999?total:m.target;
+  return{onTrack:done>=target,done,target,label:m.label,pct:Math.min(100,Math.round((done/target)*100))};
+}
+
+// ── TOAST ─────────────────────────────────────────────────────────────────
+let toastTimer=null;
+function showToast(msg, loading=false){
+  const t=document.getElementById("toast");
+  t.innerHTML = loading
+    ? `<div class="spinner"></div><span>${msg}</span>`
+    : `<span>${msg}</span>`;
+  t.style.display="flex"; t.style.opacity="1";
+  if(toastTimer)clearTimeout(toastTimer);
+  if(!loading) toastTimer=setTimeout(()=>{t.style.opacity="0";setTimeout(()=>t.style.display="none",300);},2000);
+}
+function hideToast(){
+  const t=document.getElementById("toast");
+  t.style.opacity="0"; setTimeout(()=>t.style.display="none",300);
+}
+
+// ── PRINT REPORT ──────────────────────────────────────────────────────────
+function printReport(t){
+  const{done,total,pct}=calcProgress(t);
+  const pace=getPace(t);
+  const days=daysActive(t);
+  const ecDone=EC.filter(e=>t.progress.extras[e.id]?.achieved).length;
+
+  const sectionsHTML=CF.map(section=>{
+    const sdone=section.items.filter(i=>(t.progress.competencies[i.id]?.signoffs?.length||0)>=2).length;
+    const rowsHTML=section.items.map(item=>{
+      const c=t.progress.competencies[item.id];
+      const complete=(c?.signoffs?.length||0)>=2;
+      const sigs=MANAGERS.map(mgr=>{
+        const checked=(c?.signoffs||[]).includes(mgr);
+        return`<td style="padding:4px 6px;text-align:center;border-left:1px solid #f3e8ff;font-size:13px;color:#9333ea">${checked?"✓":""}</td>`;
+      }).join("");
+      const indent=item.sub?'<span style="color:#bbb;margin-right:3px">└</span>':"";
+      const tick=complete?'<span style="color:#16a34a;margin-left:3px">✓</span>':"";
+      const note=(c?.note||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+      return`<tr style="background:${complete?"#f0fdf4":""};border-bottom:1px solid #f3e8ff">
+        <td style="padding:4px 8px;font-size:10px;color:${complete?"#166534":"#374151"}">${indent}${item.label}${tick}</td>
+        ${sigs}
+        <td style="padding:4px 6px;font-size:9px;color:#6b7280;border-left:1px solid #f3e8ff;white-space:nowrap">${complete?fmtDate(c.date):""}</td>
+        <td style="padding:4px 6px;font-size:9px;color:#6b7280;font-style:italic;border-left:1px solid #f3e8ff">${note}</td>
+      </tr>`;
+    }).join("");
+    return`<div style="margin-bottom:14px;break-inside:avoid">
+      <div style="background:linear-gradient(90deg,#7e22ce,#a855f7);padding:6px 12px;border-radius:4px 4px 0 0;display:flex;justify-content:space-between">
+        <span style="font-size:10px;font-weight:700;color:#fff;letter-spacing:.5px">${section.section}</span>
+        <span style="font-size:9px;color:#e9d5ff">${sdone}/${section.items.length}</span>
+      </div>
+      <table style="width:100%;border-collapse:collapse;border:1px solid #e9d5ff;border-top:none">
+        <thead><tr style="background:#1e1b4b">
+          <th style="padding:5px 8px;font-size:8px;color:#c7d2fe;text-align:left;width:34%">COMPETENCY</th>
+          ${MANAGERS.map(m=>`<th style="padding:5px 4px;font-size:8px;color:#c7d2fe;text-align:center;width:9%;border-left:1px solid #2d2b5a">${m.toUpperCase()}</th>`).join("")}
+          <th style="padding:5px 4px;font-size:8px;color:#c7d2fe;text-align:center;width:8%;border-left:1px solid #2d2b5a">DATE</th>
+          <th style="padding:5px 6px;font-size:8px;color:#c7d2fe;text-align:left;border-left:1px solid #2d2b5a">NOTES</th>
+        </tr></thead>
+        <tbody>${rowsHTML}</tbody>
+      </table>
+    </div>`;
+  }).join("");
+
+  const extraHTML=`<div style="margin-bottom:14px;break-inside:avoid">
+    <div style="background:linear-gradient(90deg,#b45309,#d97706);padding:6px 12px;border-radius:4px 4px 0 0;display:flex;justify-content:space-between">
+      <span style="font-size:10px;font-weight:700;color:#fff">⭐ EXTRA CREDIT — ACCELERATE YOUR GRADUATION</span>
+      <span style="font-size:9px;color:#fde68a">${ecDone}/${EC.length} achieved</span>
+    </div>
+    <table style="width:100%;border-collapse:collapse;border:1px solid #fde68a;border-top:none">
+      <tbody>${EC.map((e,i)=>{
+        const v=t.progress.extras[e.id];
+        return`<tr style="background:${i%2===0?"#fff":"#fffbeb"};border-bottom:1px solid #fef3c7">
+          <td style="padding:4px 8px;font-size:10px">${e.label}</td>
+          <td style="padding:4px 10px;font-size:11px;font-weight:700;color:${v.achieved?"#166534":"#9ca3af"};text-align:right">${v.achieved?"✓ Achieved":""}</td>
+        </tr>`;
+      }).join("")}</tbody>
+    </table>
+  </div>`;
+
+  const notesHTML=t.notes?`<div style="background:#f5f3ff;border:1px solid #e9d5ff;border-radius:6px;padding:12px 16px;break-inside:avoid">
+    <div style="font-size:10px;font-weight:700;color:#6b21a8;margin-bottom:6px;text-transform:uppercase;letter-spacing:.5px">Manager Notes</div>
+    <div style="font-size:10px;color:#374151;line-height:1.7;white-space:pre-wrap">${t.notes.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}</div>
+  </div>`:"";
+
+  const html=`<!DOCTYPE html><html><head><meta charset="UTF-8"/>
+  <title>SSG Report — ${t.name}</title>
+  <style>
+    @page{size:A4 landscape;margin:12mm}
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:Arial,Helvetica,sans-serif;background:#fff;color:#1f2937}
+    @media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}.no-print{display:none!important}}
+  </style></head><body>
+  <div style="background:linear-gradient(135deg,#581c87,#7e22ce);color:#fff;padding:12px 16px;border-radius:6px;margin-bottom:10px">
+    <div style="font-size:8px;color:#c4b5fd;letter-spacing:2px;text-transform:uppercase;margin-bottom:3px">Specialist Staffing Group — Sales Graduation Program</div>
+    <div style="font-size:15px;font-weight:800;margin-bottom:2px">${t.name}</div>
+    <div style="font-size:9px;color:#ddd6fe">Started ${fmtDate(t.startDate)} &nbsp;·&nbsp; Day ${days} of 140 &nbsp;·&nbsp; Manager: ${t.managerName||"—"} &nbsp;·&nbsp; Generated: ${new Date().toLocaleDateString("en-GB")}</div>
+  </div>
+  <div style="background:#f0eaff;border:1px solid #e9d5ff;border-radius:6px;padding:8px 14px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center">
+    <div>
+      <span style="font-size:12px;font-weight:700;color:#6b21a8">${pct}% Complete</span>
+      <span style="font-size:10px;color:#6b7280;margin-left:10px">${done}/${total} competencies</span>
+      <span style="font-size:10px;margin-left:10px;font-weight:600;color:${pace.onTrack?"#166534":"#9a3412"}">${pace.onTrack?"✓ On Track":"⚠ Behind Pace"} (${pace.done}/${pace.target} by ${pace.label})</span>
+      ${t.graduated?'<span style="font-size:10px;margin-left:10px;font-weight:700;color:#166534">🎓 GRADUATED</span>':""}
+    </div>
+    <div style="font-size:9px;color:#9ca3af">Extra credit: ${ecDone}/${EC.length}</div>
+  </div>
+  <button class="no-print" onclick="window.print()" style="background:#9333ea;color:#fff;border:none;border-radius:6px;padding:9px 20px;font-size:13px;font-weight:600;cursor:pointer;margin-bottom:12px;font-family:inherit">🖨 Print / Save as PDF</button>
+  ${sectionsHTML}${extraHTML}${notesHTML}
+  </body></html>`;
+
+  const win=window.open("","_blank","width=1100,height=800");
+  win.document.write(html);
+  win.document.close();
+}
+
+// ── DOM BUILDER ───────────────────────────────────────────────────────────
+function el(tag,attrs,...children){
+  const e=document.createElement(tag);
+  if(attrs)Object.entries(attrs).forEach(([k,v])=>{
+    if(k==="style"&&typeof v==="object"){Object.assign(e.style,v);}
+    else if(k.startsWith("on")&&typeof v==="function"){e.addEventListener(k.slice(2).toLowerCase(),v);}
+    else if(k==="className"){e.className=v;}
+    else if(k==="value"&&(tag==="input"||tag==="textarea")){e.value=v||"";}
+    else if(k==="disabled"){if(v)e.disabled=true;}
+    else if(k==="placeholder"){e.placeholder=v;}
+    else if(k==="type"){e.type=v;}
+    else if(k==="rows"){e.rows=v;}
+    else if(k==="title"){e.title=v;}
+    else if(k==="accept"){e.accept=v;}
+    else{try{e[k]=v;}catch(_){e.setAttribute(k,v);}}
+  });
+  children.flat(Infinity).forEach(c=>{
+    if(c==null||c===false||c===undefined)return;
+    e.appendChild(typeof c==="string"||typeof c==="number"?document.createTextNode(String(c)):c);
+  });
+  return e;
+}
+function ring(pct,size,stroke,color){
+  const ns="http://www.w3.org/2000/svg";
+  const svg=document.createElementNS(ns,"svg");
+  svg.setAttribute("width",size);svg.setAttribute("height",size);
+  svg.style.transform="rotate(-90deg)";svg.style.flexShrink="0";
+  const r=(size-stroke*2)/2,cx=size/2,cy=size/2,circ=2*Math.PI*r;
+  const bg=document.createElementNS(ns,"circle");
+  bg.setAttribute("cx",cx);bg.setAttribute("cy",cy);bg.setAttribute("r",r);
+  bg.setAttribute("fill","none");bg.setAttribute("stroke","#e9d5ff");bg.setAttribute("stroke-width",stroke);
+  const fg=document.createElementNS(ns,"circle");
+  fg.setAttribute("cx",cx);fg.setAttribute("cy",cy);fg.setAttribute("r",r);
+  fg.setAttribute("fill","none");fg.setAttribute("stroke",color);fg.setAttribute("stroke-width",stroke);
+  fg.setAttribute("stroke-dasharray",circ);fg.setAttribute("stroke-dashoffset",circ-(pct/100)*circ);
+  fg.setAttribute("stroke-linecap","round");fg.style.transition="stroke-dashoffset .6s ease";
+  svg.appendChild(bg);svg.appendChild(fg);
+  return svg;
+}
+
+const B = (bg,fg,border)=>({background:bg,color:fg,border:"1px solid "+(border||fg+"44"),borderRadius:"7px",padding:"9px 16px",fontSize:"13px",fontWeight:"600",cursor:"pointer",fontFamily:"inherit",transition:"opacity .15s",whiteSpace:"nowrap"});
+const INP = {width:"100%",background:"#fff",border:"1px solid #d1d5db",borderRadius:"7px",padding:"9px 12px",fontSize:"14px",fontFamily:"inherit",color:"#111"};
+
+// ── STATE ─────────────────────────────────────────────────────────────────
+let S = {
+  view:"loading",   // loading|dashboard|new|detail|reports
+  trainees:[],
+  selectedId:null,
+  detailTab:"progress",
+  expandedNote:null,
+  saving:false,
+};
+function setState(patch){ Object.assign(S,patch); render(); }
+
+// ── DB OPERATIONS ─────────────────────────────────────────────────────────
+async function loadAll(){
+  try {
+    showToast("Connecting to database...", true);
+    const rows = await getAllTrainees();
+    S.trainees = rows.map(rowToTrainee);
+    hideToast();
+    setState({view:"dashboard"});
+  } catch(e) {
+    hideToast();
+    console.error("loadAll error:", e);
+    // Table not created yet — show setup screen
+    if(e.message.includes("relation") || e.message.includes("does not exist") ||
+       e.message.includes("42P01") || e.message.includes("404") || e.message.includes("406")){
+      setState({view:"setup"});
+    } else {
+      // Show error but still allow use (will retry on next action)
+      setState({view:"error", errorMsg: e.message});
+    }
+  }
+}
+
+async function saveTrainee(t){
+  showToast("Saving...", true);
+  try {
+    await upsertTrainee(t);
+    // Update local state
+    const idx = S.trainees.findIndex(x=>x.id===t.id);
+    if(idx>=0) S.trainees[idx]=t; else S.trainees.push(t);
+    showToast("✓ Saved");
+    render();
+  } catch(e){
+    console.error("saveTrainee failed:", e);
+    // If it's a table-not-found error, show setup screen
+    if(e.message.includes("relation") || e.message.includes("does not exist") ||
+       e.message.includes("42P01") || e.message.includes("404")){
+      setState({view:"setup"});
+    } else {
+      showToast("⚠ Save failed: " + e.message);
+    }
+  }
+}
+
+async function removeTrainee(id){
+  if(!confirm("Delete this trainee? This cannot be undone."))return;
+  showToast("Deleting...", true);
+  try {
+    await deleteTrainee(id);
+    S.trainees = S.trainees.filter(t=>t.id!==id);
+    hideToast();
+    setState({view:"dashboard"});
+  } catch(e){ showToast("⚠ Delete failed: "+e.message); }
+}
+
+async function refreshAll(){
+  showToast("Refreshing...", true);
+  try {
+    const rows = await getAllTrainees();
+    S.trainees = rows.map(rowToTrainee);
+    hideToast();
+    render();
+  } catch(e){ showToast("⚠ Refresh failed"); }
+}
+
+// ── VIEWS ─────────────────────────────────────────────────────────────────
+
+// ERROR VIEW
+function renderError(){
+  const msg = S.errorMsg || "Unknown error";
+  return el("div",{style:{minHeight:"100vh",background:"#f5f3ff",display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}},
+    el("div",{style:{background:"#fff",borderRadius:"14px",padding:"36px",maxWidth:"520px",width:"100%",boxShadow:"0 4px 24px rgba(100,0,180,.1)"}},
+      el("div",{style:{fontSize:"32px",marginBottom:"12px"}},"⚠️"),
+      el("h2",{style:{fontSize:"20px",fontWeight:"800",color:"#1f2937",marginBottom:"12px"}},"Connection Error"),
+      el("p",{style:{fontSize:"13px",color:"#6b7280",marginBottom:"16px",lineHeight:"1.6"}},"Could not connect to the database. Check your internet connection and try again."),
+      el("pre",{style:{background:"#f3f4f6",padding:"12px",borderRadius:"8px",fontSize:"11px",color:"#374151",marginBottom:"20px",whiteSpace:"pre-wrap",wordBreak:"break-all"}},msg),
+      el("div",{style:{display:"flex",gap:"10px"}},
+        el("button",{style:B("#9333ea","#fff"),onClick:()=>loadAll()},"↻ Retry"),
+        el("button",{style:B("#f3f4f6","#374151","#e5e7eb"),onClick:()=>setState({view:"setup"})},"View Setup Instructions")
+      )
+    )
+  );
+}
+
+// SETUP INSTRUCTIONS (if table not yet created)
+function renderSetup(){
+  return el("div",{style:{minHeight:"100vh",background:"#f5f3ff",display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}},
+    el("div",{style:{background:"#fff",borderRadius:"14px",padding:"36px",maxWidth:"580px",width:"100%",boxShadow:"0 4px 24px rgba(100,0,180,.1)"}},
+      el("div",{style:{fontSize:"11px",color:"#9333ea",letterSpacing:"3px",textTransform:"uppercase",marginBottom:"8px"}},"One-time setup required"),
+      el("h2",{style:{fontSize:"22px",fontWeight:"800",color:"#1f2937",marginBottom:"16px"}},"Create the database table"),
+      el("p",{style:{fontSize:"13px",color:"#6b7280",marginBottom:"20px",lineHeight:"1.6"}},"You need to create one table in your Supabase project. Open your Supabase dashboard, go to ",
+        el("strong",null,"SQL Editor"),", paste this SQL and click Run:"),
+      el("pre",{style:{background:"#1e1b4b",color:"#c7d2fe",padding:"16px",borderRadius:"8px",fontSize:"12px",lineHeight:"1.7",overflowX:"auto",marginBottom:"20px",whiteSpace:"pre-wrap"}},
+`CREATE TABLE trainees (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  start_date TEXT NOT NULL,
+  manager_name TEXT DEFAULT '',
+  created_at TIMESTAMPTZ DEFAULT now(),
+  graduated BOOLEAN DEFAULT false,
+  graduated_at TIMESTAMPTZ,
+  notes TEXT DEFAULT '',
+  progress JSONB NOT NULL
+);
+
+ALTER TABLE trainees ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow all" ON trainees
+  FOR ALL TO anon
+  USING (true) WITH CHECK (true);`),
+      el("button",{style:B("#9333ea","#fff"),onClick:()=>loadAll()},"✓ I've run the SQL — connect now")
+    )
+  );
+}
+
+// LOADING
+function renderLoading(){
+  return el("div",{style:{minHeight:"100vh",background:"#f5f3ff",display:"flex",alignItems:"center",justifyContent:"center"}},
+    el("div",{style:{textAlign:"center"}},
+      el("div",{className:"spinner",style:{width:"32px",height:"32px",border:"3px solid #e9d5ff",borderTopColor:"#9333ea",margin:"0 auto 16px"}}),
+      el("div",{style:{color:"#9333ea",fontSize:"14px",fontWeight:"600"}})
+    )
+  );
+}
+
+// DASHBOARD
+function renderDashboard(){
+  const ts=S.trainees;
+  const active=ts.filter(t=>!t.graduated);
+  const grads=ts.filter(t=>t.graduated);
+
+  const hdr=el("div",{style:{background:"linear-gradient(135deg,#581c87,#7e22ce)",padding:"28px 32px 24px"}},
+    el("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",flexWrap:"wrap",gap:"16px"}},
+      el("div",null,
+        el("div",{style:{fontSize:"11px",color:"#c4b5fd",letterSpacing:"3px",textTransform:"uppercase",marginBottom:"4px"}},"Specialist Staffing Group"),
+        el("h1",{style:{fontSize:"26px",fontWeight:"800",color:"#fff",letterSpacing:"-.3px"}},"Sales Graduation Tracker"),
+        el("div",{style:{fontSize:"13px",color:"#c4b5fd",marginTop:"3px"}},"Live shared database · Outpace tomorrow, together 🚀")
+      ),
+      el("div",{style:{display:"flex",gap:"8px",flexWrap:"wrap",alignItems:"center"}},
+        el("button",{style:B("#ffffff22","#fff"),onClick:refreshAll},"↻ Refresh"),
+        el("button",{style:B("#ffffff22","#fff"),onClick:()=>setState({view:"reports"})},"📊 Reports"),
+        el("button",{style:B("#fff","#581c87","#fff"),onClick:()=>setState({view:"new"})},"+  New Trainee")
+      )
+    ),
+    el("div",{style:{display:"flex",gap:"14px",marginTop:"20px",flexWrap:"wrap"}},
+      ...[{l:"Total",v:ts.length,c:"#c4b5fd"},{l:"Active",v:active.length,c:"#e9d5ff"},
+          {l:"Graduated",v:grads.length,c:"#bbf7d0"},{l:"At Risk",v:active.filter(t=>daysActive(t)>112).length,c:"#fca5a5"}]
+        .map(s=>el("div",{style:{background:"#ffffff15",borderRadius:"10px",padding:"10px 18px",minWidth:"100px"}},
+          el("div",{style:{fontSize:"24px",fontWeight:"800",color:s.c}},s.v),
+          el("div",{style:{fontSize:"11px",color:"#c4b5fd",textTransform:"uppercase",letterSpacing:".5px"}},s.l)
+        ))
+    )
+  );
+
+  let bodyContent;
+  if(ts.length===0){
+    bodyContent=el("div",{style:{textAlign:"center",padding:"60px 20px",color:"#9ca3af"}},
+      el("div",{style:{fontSize:"48px",marginBottom:"12px"}},"🎯"),
+      el("div",{style:{fontSize:"18px",marginBottom:"6px",color:"#6b7280"}},"No trainees yet"),
+      el("div",{style:{fontSize:"13px"}},"Add your first new starter to begin tracking")
+    );
+  } else {
+    bodyContent=el("div",null);
+    if(active.length>0){
+      bodyContent.appendChild(el("h2",{style:{fontSize:"13px",fontWeight:"700",color:"#7e22ce",letterSpacing:"2px",textTransform:"uppercase",margin:"0 0 14px"}},"Active Trainees"));
+      const g=el("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(290px,1fr))",gap:"14px",marginBottom:"36px"}});
+      active.forEach(t=>g.appendChild(renderCard(t)));
+      bodyContent.appendChild(g);
+    }
+    if(grads.length>0){
+      bodyContent.appendChild(el("h2",{style:{fontSize:"13px",fontWeight:"700",color:"#166534",letterSpacing:"2px",textTransform:"uppercase",margin:"0 0 14px"}},"🎓 Graduates"));
+      const g2=el("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(290px,1fr))",gap:"14px"}});
+      grads.forEach(t=>g2.appendChild(renderCard(t)));
+      bodyContent.appendChild(g2);
+    }
+  }
+
+  const infoBar=el("div",{style:{marginTop:"40px",padding:"14px 18px",background:"#fff",border:"1px solid #e9d5ff",borderRadius:"10px",fontSize:"12px",color:"#9ca3af"}});
+  infoBar.innerHTML="<strong style='color:#6b7280'>☁ Live database:</strong> All changes save instantly to Supabase and are visible to everyone using this file in real time. Share this HTML file with your team.";
+
+  return el("div",{style:{minHeight:"100vh",background:"#f5f3ff"}},
+    hdr, el("div",{style:{padding:"28px 32px"}}, bodyContent, infoBar)
+  );
+}
+
+function renderCard(t){
+  const{pct,done,total}=calcProgress(t);
+  const color=accentColor(t);
+  const pace=getPace(t);
+  const ec=EC.filter(e=>t.progress.extras[e.id]?.achieved).length;
+  const card=el("div",{className:"card",style:{border:"1px solid "+color+"33"},
+    onClick:()=>setState({view:"detail",selectedId:t.id,detailTab:"progress",expandedNote:null})
+  });
+  card.addEventListener("mouseenter",()=>card.style.borderColor=color);
+  card.addEventListener("mouseleave",()=>card.style.borderColor=color+"33");
+  const topBar=el("div",{style:{position:"absolute",top:0,left:0,right:0,height:"3px",background:"linear-gradient(90deg,"+color+",transparent)"}});
+  const nameRow=el("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"14px"}},
+    el("div",null,
+      el("div",{style:{fontSize:"16px",fontWeight:"700",color:"#111",marginBottom:"3px"}},t.name),
+      el("div",{style:{fontSize:"11px",color:"#9ca3af"}},"Started "+fmtDate(t.startDate)),
+      t.managerName?el("div",{style:{fontSize:"11px",color:"#9ca3af"}},"Mgr: "+t.managerName):null
+    ),
+    el("div",{style:{position:"relative",width:"52px",height:"52px",flexShrink:"0"}},
+      ring(pct,52,5,color),
+      el("div",{style:{position:"absolute",inset:"0",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"11px",fontWeight:"800",color}},pct+"%")
+    )
+  );
+  const bar=el("div",{style:{background:"#f9fafb",borderRadius:"8px",padding:"8px 12px",marginBottom:"10px"}},
+    el("div",{style:{display:"flex",justifyContent:"space-between",marginBottom:"5px",fontSize:"12px",color:"#6b7280"}},
+      el("span",null,done+"/"+total+" signed off"),
+      el("span",{style:{color:t.graduated?"#166534":daysActive(t)>112?"#dc2626":"#6b7280",fontWeight:"600"}},
+        t.graduated?"🎓 Graduated":daysLeft(t)+"d left")
+    ),
+    el("div",{style:{background:"#e5e7eb",borderRadius:"3px",height:"4px",overflow:"hidden"}},
+      el("div",{style:{height:"100%",width:pct+"%",background:color,borderRadius:"3px",transition:"width .6s"}})
+    )
+  );
+  const badges=el("div",{style:{display:"flex",gap:"6px",flexWrap:"wrap"}},
+    el("span",{className:"badge",style:{color:pace.onTrack?"#166534":"#9a3412",background:pace.onTrack?"#f0fdf4":"#fff7ed"}},pace.onTrack?"✓ On pace":"⚠ Behind pace"),
+    ec>0?el("span",{className:"badge",style:{color:"#92400e",background:"#fef3c7"}},"⭐ "+ec+" extra"):null
+  );
+  card.append(topBar,nameRow,bar,badges);
+  return card;
+}
+
+// NEW TRAINEE
+function renderNew(){
+  let nameIn,dateIn,mgrIn;
+  const errEl=el("div",{style:{color:"#dc2626",fontSize:"13px",marginBottom:"14px",display:"none"}});
+  const form=el("div",{style:{background:"#fff",borderRadius:"14px",padding:"36px",width:"100%",maxWidth:"480px",boxShadow:"0 4px 24px rgba(100,0,180,.1)"}},
+    el("div",{style:{fontSize:"11px",color:"#9333ea",letterSpacing:"3px",textTransform:"uppercase",marginBottom:"6px"}},"New Record"),
+    el("h2",{style:{fontSize:"22px",fontWeight:"800",color:"#1f2937",marginBottom:"26px"}},"Add New Trainee"),
+    el("div",{style:{marginBottom:"16px"}},
+      el("label",{style:{display:"block",fontSize:"12px",color:"#6b7280",marginBottom:"5px",fontWeight:"600"}},"Trainee Full Name *"),
+      nameIn=el("input",{type:"text",placeholder:"e.g. Alex Johnson",style:INP})
+    ),
+    el("div",{style:{marginBottom:"16px"}},
+      el("label",{style:{display:"block",fontSize:"12px",color:"#6b7280",marginBottom:"5px",fontWeight:"600"}},"Start Date *"),
+      dateIn=el("input",{type:"date",style:INP,value:new Date().toISOString().split("T")[0]})
+    ),
+    el("div",{style:{marginBottom:"16px"}},
+      el("label",{style:{display:"block",fontSize:"12px",color:"#6b7280",marginBottom:"5px",fontWeight:"600"}},"Responsible Manager"),
+      mgrIn=el("input",{type:"text",placeholder:"e.g. Sarah Williams",style:INP})
+    ),
+    errEl,
+    el("div",{style:{display:"flex",gap:"10px",marginTop:"6px"}},
+      el("button",{style:B("#9333ea","#fff"),onClick:async()=>{
+        const n=nameIn.value.trim(),d=dateIn.value,m=mgrIn.value.trim();
+        if(!n){errEl.textContent="Name is required";errEl.style.display="block";return;}
+        const t=newTrainee(n,d,m);
+        await saveTrainee(t);
+        setState({view:"detail",selectedId:t.id,detailTab:"progress",expandedNote:null});
+      }},"Create Record"),
+      el("button",{style:B("#f3f4f6","#374151","#e5e7eb"),onClick:()=>setState({view:"dashboard"})},"Cancel")
+    )
+  );
+  return el("div",{style:{minHeight:"100vh",background:"#f5f3ff",display:"flex",alignItems:"center",justifyContent:"center",padding:"20px"}},form);
+}
+
+// PACE BAR
+function renderPaceBar(t){
+  const days=daysActive(t),{done}=calcProgress(t);
+  const total=CF.flatMap(s=>s.items).length;
+  const{onTrack,target,label,pct:pp}=getPace(t);
+  const track=el("div",{style:{position:"relative",height:"38px",marginBottom:"6px"}});
+  track.appendChild(el("div",{style:{position:"absolute",top:"15px",left:0,right:0,height:"8px",background:"#e9d5ff",borderRadius:"4px"}}));
+  track.appendChild(el("div",{style:{position:"absolute",top:"15px",left:0,width:Math.min(100,(days/140)*100)+"%",height:"8px",background:"linear-gradient(90deg,#9333ea,#c084fc)",borderRadius:"4px",transition:"width .6s"}}));
+  PACE.forEach((m,i)=>{
+    const xp=(m.days/140)*100,tgt=m.target>=9999?total:m.target;
+    const reached=done>=tgt,isCur=days<=m.days&&(i===0||days>PACE[i-1].days);
+    const dot=el("div",{style:{position:"absolute",left:xp+"%",top:0,transform:"translateX(-50%)",textAlign:"center"}},
+      el("div",{style:{width:isCur?"18px":"12px",height:isCur?"18px":"12px",borderRadius:"50%",margin:"0 auto",background:reached?"#9333ea":isCur?"#c084fc":"#ddd6fe",border:isCur?"2px solid #7e22ce":"2px solid #c4b5fd",marginTop:isCur?"5px":"8px",boxShadow:isCur?"0 0 0 3px #ede9fe":"none"}}),
+      el("div",{style:{fontSize:"9px",color:isCur?"#7e22ce":"#9ca3af",fontWeight:isCur?"700":"400",marginTop:"2px",whiteSpace:"nowrap"}},tgt>=total?"All":""+tgt)
+    );
+    track.appendChild(dot);
+  });
+  if(days<=140) track.appendChild(el("div",{style:{position:"absolute",left:Math.min(100,(days/140)*100)+"%",top:0,transform:"translateX(-50%)",width:"2px",height:"38px",background:"#9333ea"}}));
+  const labels=el("div",{style:{display:"flex",justifyContent:"space-between",marginBottom:"10px"}});
+  PACE.forEach((m,i)=>{const isCur=days<=m.days&&(i===0||days>PACE[i-1].days);labels.appendChild(el("div",{style:{fontSize:"9px",color:isCur?"#7e22ce":"#9ca3af",fontWeight:isCur?"700":"400"}},m.label));});
+  return el("div",{style:{background:"#faf8ff",border:"1px solid #e9d5ff",borderRadius:"10px",padding:"14px 18px",marginBottom:"20px"}},
+    el("div",{style:{fontSize:"12px",fontWeight:"700",color:"#6b21a8",marginBottom:"10px",textTransform:"uppercase",letterSpacing:".5px"}},"Pace Progress"),
+    track,labels,
+    el("div",{style:{display:"flex",gap:"14px",alignItems:"center",flexWrap:"wrap"}},
+      el("div",{style:{flex:"1",background:onTrack?"#f0fdf4":"#fff7ed",border:"1px solid "+(onTrack?"#bbf7d0":"#fed7aa"),borderRadius:"8px",padding:"8px 14px"}},
+        el("span",{style:{fontSize:"12px",color:onTrack?"#166534":"#9a3412",fontWeight:"700"}},onTrack?"✓ On Track":"⚠ Behind Target"),
+        el("span",{style:{fontSize:"12px",color:"#666",marginLeft:"10px"}},done+"/"+target+" needed by "+label+" — "+pp+"% of pace target")
+      ),
+      el("div",{style:{fontSize:"12px",color:"#9333ea",fontWeight:"600"}},"Day "+days+" / 140")
+    )
+  );
+}
+
+// DETAIL
+function renderDetail(){
+  const t=S.trainees.find(x=>x.id===S.selectedId);
+  if(!t)return renderDashboard();
+  const{pct,done,total}=calcProgress(t);
+  const color=accentColor(t);
+  const ec=EC.filter(e=>t.progress.extras[e.id]?.achieved).length;
+
+  async function persistTrainee(updated){
+    const idx=S.trainees.findIndex(x=>x.id===updated.id);
+    if(idx>=0)S.trainees[idx]=updated;
+    await saveTrainee(updated);
+    render();
+  }
+
+  const ringWrap=el("div",{style:{position:"relative",width:"64px",height:"64px",flexShrink:"0"}},
+    ring(pct,64,6,"#e9d5ff"),
+    el("div",{style:{position:"absolute",inset:"0",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"13px",fontWeight:"800",color:"#e9d5ff"}},pct+"%")
+  );
+
+  const hdr=el("div",{style:{background:"linear-gradient(135deg,#581c87,#7e22ce)",padding:"20px 28px 18px"}},
+    el("button",{style:{background:"none",border:"none",color:"#c4b5fd",cursor:"pointer",fontSize:"13px",marginBottom:"14px",padding:"0",display:"block"},
+      onClick:()=>setState({view:"dashboard"})},"← Back to Dashboard"),
+    el("div",{style:{display:"flex",alignItems:"flex-start",justifyContent:"space-between",flexWrap:"wrap",gap:"14px"}},
+      el("div",{style:{display:"flex",alignItems:"center",gap:"16px"}},
+        ringWrap,
+        el("div",null,
+          el("h2",{style:{fontSize:"22px",fontWeight:"800",color:"#fff",marginBottom:"4px"}},t.name),
+          el("div",{style:{fontSize:"12px",color:"#c4b5fd"}},"Started "+fmtDate(t.startDate)+" · Day "+daysActive(t)+" · "+daysLeft(t)+"d remaining"),
+          el("div",{style:{display:"flex",gap:"8px",marginTop:"6px",flexWrap:"wrap"}},
+            el("span",{className:"badge",style:{background:"#ffffff22",color:"#e9d5ff"}},done+"/"+total+" signed off"),
+            ec>0?el("span",{className:"badge",style:{background:"#fef3c7",color:"#92400e"}},"⭐ "+ec+" extra credit"):null,
+            t.graduated?el("span",{className:"badge",style:{background:"#f0fdf4",color:"#166534"}},"🎓 Graduated"):null
+          )
+        )
+      ),
+      el("div",{style:{display:"flex",gap:"8px",alignItems:"center",flexWrap:"wrap"}},
+        el("button",{style:B("#ffffff22","#fff"),onClick:()=>printReport(t)},"🖨 Print / Save PDF"),
+        el("button",{style:B(t.graduated?"#f0fdf4":"#fff",t.graduated?"#166534":"#581c87"),onClick:async()=>{
+          const u=JSON.parse(JSON.stringify(t));
+          u.graduated=!u.graduated;u.graduatedAt=u.graduated?new Date().toISOString():null;
+          await persistTrainee(u);
+        }},t.graduated?"↩ Ungraduate":"🎓 Mark Graduated"),
+        el("button",{style:B("#fee2e2","#dc2626","#fca5a5"),onClick:()=>removeTrainee(t.id)},"🗑")
+      )
+    )
+  );
+
+  const tabBar=el("div",{style:{display:"flex",borderBottom:"2px solid #e9d5ff",padding:"0 28px",background:"#faf5ff"}});
+  [["progress","Competencies"],["extra","Extra Credit"],["notes","Notes"]].forEach(([id,label])=>{
+    tabBar.appendChild(el("button",{className:"tab-btn"+(S.detailTab===id?" active":""),
+      onClick:()=>setState({detailTab:id,expandedNote:null})},label));
+  });
+
+  const content=el("div",{style:{padding:"24px 28px"}});
+  if(S.detailTab==="progress") content.appendChild(renderCompTable(t,persistTrainee));
+  if(S.detailTab==="extra")    content.appendChild(renderExtra(t,persistTrainee));
+  if(S.detailTab==="notes")    content.appendChild(renderNotes(t,persistTrainee));
+
+  return el("div",{style:{minHeight:"100vh",background:"#f5f3ff"}},
+    hdr, el("div",{style:{padding:"20px 28px 0"}},renderPaceBar(t)), tabBar, content
+  );
+}
+
+function renderCompTable(t,persist){
+  const wrap=el("div",null);
+  CF.forEach(section=>{
+    const sdone=section.items.filter(i=>(t.progress.competencies[i.id]?.signoffs?.length||0)>=2).length;
+    const secHead=el("div",{style:{background:"linear-gradient(90deg,#7e22ce,#a855f7)",padding:"9px 14px",borderRadius:"6px 6px 0 0",display:"flex",justifyContent:"space-between",alignItems:"center"}},
+      el("span",{style:{fontSize:"12px",fontWeight:"700",color:"#fff",letterSpacing:"1px",textTransform:"uppercase"}},section.section),
+      el("span",{style:{fontSize:"11px",color:"#e9d5ff"}},sdone+"/"+section.items.length)
+    );
+    const tbl=el("div",{style:{border:"1px solid #e9d5ff",borderTop:"none",borderRadius:"0 0 8px 8px",overflow:"hidden"}});
+    const hdrRow=el("div",{className:"comp-hdr"});
+    ["Competency",...MANAGERS.map(m=>m.split(" ").slice(0,2).join(" ")),"Date","💬"].forEach(h=>{
+      hdrRow.appendChild(el("div",{style:{padding:"8px 10px",fontSize:"10px",color:"#c7d2fe",fontWeight:"700",textTransform:"uppercase",letterSpacing:".5px"}},h));
+    });
+    tbl.appendChild(hdrRow);
+
+    section.items.forEach((item,idx)=>{
+      const comp=t.progress.competencies[item.id];
+      const complete=(comp?.signoffs?.length||0)>=2;
+      const hasNote=(comp?.note||"").trim().length>0;
+      const isExp=S.expandedNote===item.id;
+      const rowBg=complete?"#f0fdf4":idx%2===0?"#fff":"#faf5ff";
+      const row=el("div",{className:"comp-row",style:{background:rowBg}});
+
+      const labelCell=el("div",{style:{padding:"9px 12px",fontSize:"12px",color:complete?"#166534":"#374151",display:"flex",alignItems:"center",gap:"5px"}});
+      if(item.sub)labelCell.appendChild(el("span",{style:{color:"#d1d5db",fontSize:"11px",flexShrink:"0"}},"└"));
+      labelCell.appendChild(document.createTextNode(item.label));
+      if(complete)labelCell.appendChild(el("span",{style:{color:"#16a34a",flexShrink:"0"}}," ✓"));
+      row.appendChild(labelCell);
+
+      MANAGERS.forEach(mgr=>{
+        const checked=(comp?.signoffs||[]).includes(mgr);
+        const cell=el("div",{style:{display:"flex",alignItems:"center",justifyContent:"center",borderLeft:"1px solid #f3e8ff"}});
+        const cb=el("button",{className:"chk"+(checked?" on":""),onClick:async()=>{
+          const u=JSON.parse(JSON.stringify(t));
+          const c=u.progress.competencies[item.id];
+          const i2=c.signoffs.indexOf(mgr);
+          if(i2>=0){c.signoffs.splice(i2,1);if(c.signoffs.length<2)c.date=null;}
+          else{c.signoffs.push(mgr);if(c.signoffs.length>=2&&!c.date)c.date=new Date().toISOString().split("T")[0];}
+          await persist(u);
+        }},checked?"✓":"");
+        cell.appendChild(cb);row.appendChild(cell);
+      });
+
+      row.appendChild(el("div",{style:{padding:"9px 8px",fontSize:"11px",color:"#9ca3af",borderLeft:"1px solid #f3e8ff",display:"flex",alignItems:"center"}},comp?.date?fmtDate(comp.date):""));
+
+      const noteCell=el("div",{style:{display:"flex",alignItems:"center",justifyContent:"center",borderLeft:"1px solid #f3e8ff"}});
+      noteCell.appendChild(el("button",{className:"note-btn"+(hasNote?" has":""),title:isExp?"Close":"Add note",
+        onClick:()=>setState({expandedNote:isExp?null:item.id})},isExp?"▲":"✏"));
+      row.appendChild(noteCell);
+      tbl.appendChild(row);
+
+      if(isExp){
+        const noteArea=el("div",{className:"note-row"});
+        const ta=el("textarea",{rows:"2",placeholder:"Add a coaching note or progress comment...",
+          style:{...INP,resize:"vertical",fontSize:"12px",minHeight:"54px",color:"#374151",background:"#fff"}});
+        ta.value=comp?.note||"";
+        let noteTimer=null;
+        ta.addEventListener("input",e=>{
+          clearTimeout(noteTimer);
+          noteTimer=setTimeout(async()=>{
+            const u=JSON.parse(JSON.stringify(t));
+            u.progress.competencies[item.id].note=e.target.value;
+            await persist(u);
+          },800);
+        });
+        noteArea.appendChild(ta);
+        tbl.appendChild(noteArea);
+        setTimeout(()=>ta.focus(),50);
+      }
+    });
+    wrap.appendChild(el("div",{style:{marginBottom:"28px"}},secHead,tbl));
+  });
+  return wrap;
+}
+
+function renderExtra(t,persist){
+  const done=EC.filter(e=>t.progress.extras[e.id]?.achieved).length;
+  const grid=el("div",{style:{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(250px,1fr))",gap:"10px"}});
+  EC.forEach(ec=>{
+    const v=t.progress.extras[ec.id];
+    const card=el("div",{style:{display:"flex",alignItems:"center",gap:"12px",padding:"11px 14px",background:v.achieved?"#fffbeb":"#fff",border:"1px solid "+(v.achieved?"#fbbf24":"#e5e7eb"),borderRadius:"8px",cursor:"pointer",transition:"all .15s"}},
+      el("div",{style:{width:"22px",height:"22px",borderRadius:"5px",border:"2px solid "+(v.achieved?"#f59e0b":"#d1d5db"),background:v.achieved?"#f59e0b":"#fff",display:"flex",alignItems:"center",justifyContent:"center",flexShrink:"0",color:"#fff",fontSize:"13px",fontWeight:"800"}},v.achieved?"✓":""),
+      el("div",null,
+        el("div",{style:{fontSize:"13px",color:v.achieved?"#92400e":"#374151",fontWeight:v.achieved?"600":"400"}},ec.label),
+        v.date?el("div",{style:{fontSize:"11px",color:"#9ca3af",marginTop:"1px"}},fmtDate(v.date)):null
+      )
+    );
+    card.addEventListener("click",async()=>{
+      const u=JSON.parse(JSON.stringify(t));
+      const vv=u.progress.extras[ec.id];
+      if(vv.achieved){vv.achieved=false;vv.date=null;}else{vv.achieved=true;vv.date=new Date().toISOString().split("T")[0];}
+      await persist(u);
+    });
+    card.addEventListener("mouseenter",()=>card.style.borderColor="#fbbf24");
+    card.addEventListener("mouseleave",()=>card.style.borderColor=v.achieved?"#fbbf24":"#e5e7eb");
+    grid.appendChild(card);
+  });
+  return el("div",null,
+    el("div",{style:{background:"linear-gradient(90deg,#b45309,#d97706)",padding:"10px 14px",borderRadius:"8px",marginBottom:"18px",display:"flex",justifyContent:"space-between"}},
+      el("span",{style:{fontSize:"12px",fontWeight:"700",color:"#fff",textTransform:"uppercase",letterSpacing:"1px"}},"⭐ Extra Credit — Accelerate Your Graduation"),
+      el("span",{style:{fontSize:"12px",color:"#fde68a"}},done+"/"+EC.length+" achieved")
+    ),grid
+  );
+}
+
+function renderNotes(t,persist){
+  const ta=el("textarea",{rows:"10",placeholder:"Add coaching notes, concerns, observations, milestones...",
+    style:{...INP,height:"220px",resize:"vertical",lineHeight:"1.7",color:"#374151"}});
+  ta.value=t.notes||"";
+  let saveBtn;
+  return el("div",{style:{maxWidth:"680px"}},
+    el("label",{style:{display:"block",fontSize:"12px",color:"#6b7280",marginBottom:"8px",fontWeight:"600"}},"Manager Notes for "+t.name),
+    ta,
+    saveBtn=el("button",{style:{...B("#9333ea","#fff"),marginTop:"12px"},onClick:async()=>{
+      const u=JSON.parse(JSON.stringify(t));
+      u.notes=ta.value;
+      await persist(u);
+    }},"Save Notes")
+  );
+}
+
+// REPORTS
+function renderReports(){
+  const ts=S.trainees;
+  return el("div",{style:{minHeight:"100vh",background:"#f5f3ff"}},
+    el("div",{style:{background:"linear-gradient(135deg,#581c87,#7e22ce)",padding:"24px 28px"}},
+      el("button",{style:{background:"none",border:"none",color:"#c4b5fd",cursor:"pointer",fontSize:"13px",marginBottom:"14px",padding:"0",display:"block"},
+        onClick:()=>setState({view:"dashboard"})},"← Back"),
+      el("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:"12px"}},
+        el("div",null,
+          el("h2",{style:{fontSize:"22px",fontWeight:"800",color:"#fff"}},"All Reports"),
+          el("div",{style:{fontSize:"13px",color:"#c4b5fd",marginTop:"3px"}},ts.length+" trainees")
+        )
+      )
+    ),
+    el("div",{style:{padding:"24px 28px"}},
+      ts.length===0
+        ? el("div",{style:{textAlign:"center",color:"#9ca3af",padding:"60px"}},"No trainees yet.")
+        : el("div",{style:{display:"flex",flexDirection:"column",gap:"12px"}},
+            ...ts.map(t=>{
+              const{pct,done,total}=calcProgress(t);
+              const pace=getPace(t);
+              const color=accentColor(t);
+              return el("div",{style:{background:"#fff",border:"1px solid #e9d5ff",borderRadius:"10px",padding:"16px 20px",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:"12px",boxShadow:"0 1px 4px rgba(0,0,0,.04)"}},
+                el("div",null,
+                  el("div",{style:{fontSize:"15px",fontWeight:"700",color:"#1f2937"}},t.name),
+                  el("div",{style:{fontSize:"12px",color:"#9ca3af",marginTop:"2px"}},"Started "+fmtDate(t.startDate)+" · Day "+daysActive(t)+(t.managerName?" · Mgr: "+t.managerName:"")),
+                  el("div",{style:{marginTop:"6px",display:"flex",gap:"8px",flexWrap:"wrap"}},
+                    el("span",{className:"badge",style:{color,background:color+"15"}},done+"/"+total+" ("+pct+"%)"),
+                    el("span",{className:"badge",style:{color:pace.onTrack?"#166534":"#9a3412",background:pace.onTrack?"#f0fdf4":"#fff7ed"}},pace.onTrack?"✓ On pace":"⚠ Behind"),
+                    t.graduated?el("span",{className:"badge",style:{color:"#166534",background:"#f0fdf4"}},"🎓 Graduated"):null
+                  )
+                ),
+                el("button",{style:B("#9333ea","#fff"),onClick:()=>printReport(t)},"🖨 Print / Save PDF")
+              );
+            })
+          )
+    )
+  );
+}
+
+// MAIN RENDER
+function render(){
+  const app=document.getElementById("app");
+  app.innerHTML="";
+  let v;
+  if(S.view==="loading")   v=renderLoading();
+  else if(S.view==="error")   v=renderError();
+  else if(S.view==="setup") v=renderSetup();
+  else if(S.view==="dashboard") v=renderDashboard();
+  else if(S.view==="new")   v=renderNew();
+  else if(S.view==="detail") v=renderDetail();
+  else if(S.view==="reports") v=renderReports();
+  if(v) app.appendChild(v);
+}
+
+// BOOT
+render();
+loadAll();
+</script>
+</body>
+</html>
